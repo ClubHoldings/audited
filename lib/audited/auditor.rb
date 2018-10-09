@@ -67,7 +67,7 @@ module Audited
           before_destroy :require_comment if audited_options[:on].include?(:destroy)
         end
 
-        has_many :audits, -> { order(version: :asc) }, as: :auditable, class_name: Audited.audit_class.name, inverse_of: :auditable
+        has_many :audits, -> { order(version: :asc) }, as: :auditable, class_name: Audited.audit_class.name, inverse_of: :auditable, validate: false, autosave: false
         Audited.audit_class.audited_class_names << to_s
 
         after_create :audit_create    if audited_options[:on].include?(:create)
@@ -98,6 +98,37 @@ module Audited
         else
           super
         end
+      end
+
+      def changed_audited_attributes
+        attributes.slice(*changed_attributes.keys).except(*non_audited_columns)
+      end
+
+      # Quintess addition. AR's Dirty implementation is too weak. This eliminates nil->'' or ''->nil showing up as a change.
+      def changed_substantially?
+        changes = false
+        changed_audited_attributes.each_key{|attr_name| changes ||= !self.send(attr_name).blank? || !self.send("#{attr_name}_was").blank?}
+        changes
+      end
+
+      # Quintess addition. AR's Dirty implementation is too weak. This eliminates nil->'' or ''->nil showing up as a change.
+      # I chose to add a new method rather than monkey patch AR.
+      def has_changed? attr_name
+        # logger.debug "has_changed? #{changed_attributes.inspect} #{attr_name.inspect}" if logger.debug
+        if changed_attributes.has_key?(attr_name.to_s)
+          is = self.send attr_name
+          was = self.send("#{attr_name}_was")
+          # logger.debug "in changed_attributes. is: #{is.inspect} was: #{was.inspect}"
+          return true unless was.blank? && is.blank?
+        end
+        false
+      end
+
+      def changes_other_than(attributes)
+        attributes = [attributes] if !attributes.is_a? Array
+        substantial_changes = before_and_after_hash(changed_audited_attributes)
+        attributes.each{|a| substantial_changes.delete(a.to_s)}
+        substantial_changes
       end
 
       # Temporarily turns off auditing while saving.
@@ -205,6 +236,40 @@ module Audited
 
       private
 
+      # Quintess addition
+      def add_additional_columns(attrs)
+        more_attrs = attrs.clone
+        more_attrs.merge!(Audited.quintess_audit_class.uids_columns) if Audited.quintess_audit_class
+        more_attrs.merge!(Audit.uids_columns) if Audit.respond_to?(:uids_columns)
+        more_attrs.merge!(audit_columns) if self.respond_to?( :audit_columns )
+        more_attrs
+      end
+
+      def before_and_after_hash(changes, mode = :update)
+        # warn "before_and_after_hash changes #{changes.inspect} mode #{mode.inspect}"
+        h = changes.clone
+        h.keys.each do |attr_name|
+          case mode
+          when :create
+            h[attr_name] = [nil, simplify(h[attr_name])]
+          when :destroy
+            h[attr_name] = [simplify(h[attr_name]), nil]
+          else
+            entry = h[attr_name] = [simplify(h[attr_name][0]), simplify(h[attr_name][1])]
+            if entry[0].blank? && entry[1].blank?
+              h.delete(attr_name)
+            end
+          end
+        end
+        h
+      end
+
+      def simplify(value)
+        # TODO Revisit this if we continue to have trouble with runt, etc.
+        # %w{BigDecimal Date Time}.include?(value.class.to_s) ? value.to_s : value
+        value
+      end
+
       def audited_changes
         all_changes = respond_to?(:changes_to_save) ? changes_to_save : changes
         filtered_changes = \
@@ -251,19 +316,18 @@ module Audited
       end
 
       def audit_create
-        write_audit(action: 'create', audited_changes: audited_attributes,
-                    comment: audit_comment)
+        write_audit(action: 'create', audited_changes: before_and_after_hash(audited_attributes, :create), comment: audit_comment)
       end
 
       def audit_update
         unless (changes = audited_changes).empty? && audit_comment.blank?
-          write_audit(action: 'update', audited_changes: changes,
+          write_audit(action: 'update', audited_changes: before_and_after_hash(changes, :update),
                       comment: audit_comment)
         end
       end
 
       def audit_destroy
-        write_audit(action: 'destroy', audited_changes: audited_attributes,
+        write_audit(action: 'destroy', audited_changes: before_and_after_hash(audited_attributes, :destroy),
                     comment: audit_comment) unless new_record?
       end
 
@@ -272,11 +336,22 @@ module Audited
         self.audit_comment = nil
 
         if auditing_enabled
-          run_callbacks(:audit) {
-            audit = audits.create(attrs)
-            combine_audits_if_needed if attrs[:action] != 'create'
-            audit
-          }
+          if attrs[:action] == 'destroy'
+            # AR was preventing the .create from working when the parent object was destroyed.
+            run_callbacks(:audit) {
+              a=self.audits.build(add_additional_columns(attrs))
+              a.save(validate: false)
+              combine_audits_if_needed if attrs[:action] != 'create'
+              audit
+            }
+          else
+            run_callbacks(:audit) {
+              # byebug
+              audit = audits.create(add_additional_columns(attrs))
+              combine_audits_if_needed if attrs[:action] != 'create'
+              audit
+            }
+          end
         end
       end
 
