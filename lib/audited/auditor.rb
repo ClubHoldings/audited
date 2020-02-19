@@ -101,7 +101,7 @@ module Audited
       end
 
       def changed_audited_attributes
-        attributes.slice(*changed_attributes.keys).except(*non_audited_columns)
+        attributes.slice(*changed_attributes.keys).except(*self.class.non_audited_columns)
       end
 
       # Quintess addition. AR's Dirty implementation is too weak. This eliminates nil->'' or ''->nil showing up as a change.
