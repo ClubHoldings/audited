@@ -128,7 +128,7 @@ module Audited
         auditable_type.constantize.create!(audited_changes)
       when 'update'
         # changes back attributes
-        auditable.update_attributes!(audited_changes.transform_values(&:first))
+        auditable.update!(audited_changes.transform_values(&:first))
       else
         raise StandardError, "invalid action given #{action}"
       end
@@ -161,13 +161,15 @@ module Audited
     # All audits made during the block called will be recorded as made
     # by +user+. This method is hopefully threadsafe, making it ideal
     # for background operations that require audit information.
-    # def self.as_user(user)
-    #   last_audited_user = ::Audited.store[:audited_user]
-    #   ::Audited.store[:audited_user] = user
-    #   yield
-    # ensure
-    #   ::Audited.store[:audited_user] = last_audited_user
-    # end
+
+    # ClubHoldings version had this commented out
+    def self.as_user(user)
+      last_audited_user = ::Audited.store[:audited_user]
+      ::Audited.store[:audited_user] = user
+      yield
+    ensure
+      ::Audited.store[:audited_user] = last_audited_user
+    end
 
     # @private
     def self.reconstruct_attributes(audits)
@@ -236,6 +238,15 @@ module Audited
     end
 
     def self.disabled
+      # if action == 'create'
+      #   self.version = 1
+      # else
+      #   max = self.class.auditable_finder(auditable_id, auditable_type).maximum(:version) || 0
+      #   self.version = max + 1
+      # end
+
+      # we'll try it without versioning first.
+      # self.version = 0
       @@disabled rescue @@disabled = false
     end
 

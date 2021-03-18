@@ -34,6 +34,16 @@ module Audited
       # * +require_comment+ - Ensures that audit_comment is supplied before
       #   any create, update or destroy operation.
       # * +max_audits+ - Limits the number of stored audits.
+
+      # * +redacted+ - Changes to these fields will be logged, but the values
+      #   will not. This is useful, for example, if you wish to audit when a
+      #   password is changed, without saving the actual password in the log.
+      #   To store values as something other than '[REDACTED]', pass an argument
+      #   to the redaction_value option.
+      #
+      #     class User < ActiveRecord::Base
+      #       audited redacted: :password, redaction_value: SecureRandom.uuid
+      #     end
       #
       # * +if+ - Only audit the model when the given function returns true
       # * +unless+ - Only audit the model when the given function returns false
@@ -131,6 +141,8 @@ module Audited
         substantial_changes
       end
 
+      REDACTED = '[REDACTED]'
+
       # Temporarily turns off auditing while saving.
       def save_without_auditing
         without_auditing { save }
@@ -144,6 +156,21 @@ module Audited
       #
       def without_auditing(&block)
         self.class.without_auditing(&block)
+      end
+
+      # Temporarily turns on auditing while saving.
+      def save_with_auditing
+        with_auditing { save }
+      end
+
+      # Executes the block with the auditing callbacks enabled.
+      #
+      #   @foo.with_auditing do
+      #     @foo.save
+      #   end
+      #
+      def with_auditing(&block)
+        self.class.with_auditing(&block)
       end
 
       # Gets an array of the revisions available
@@ -279,6 +306,7 @@ module Audited
             all_changes.except(*self.class.non_audited_columns)
           end
 
+        filtered_changes = redact_values(filtered_changes)
         filtered_changes = normalize_enum_changes(filtered_changes)
         filtered_changes.to_hash
       end
@@ -297,6 +325,22 @@ module Audited
           end
         end
         changes
+      end
+
+      def redact_values(filtered_changes)
+        [audited_options[:redacted]].flatten.compact.each do |option|
+          changes = filtered_changes[option.to_s]
+          new_value = audited_options[:redaction_value] || REDACTED
+          if changes.is_a? Array
+            values = changes.map { new_value }
+          else
+            values = new_value
+          end
+          hash = Hash[option.to_s, values]
+          filtered_changes.merge!(hash)
+        end
+
+        filtered_changes
       end
 
       def rails_below?(rails_version)
@@ -320,7 +364,7 @@ module Audited
       end
 
       def audit_update
-        unless (changes = audited_changes).empty? && audit_comment.blank?
+        unless (changes = audited_changes).empty? && (audit_comment.blank? || audited_options[:update_with_comment_only] == false)
           write_audit(action: 'update', audited_changes: before_and_after_hash(changes, :update),
                       comment: audit_comment)
         end
@@ -342,7 +386,7 @@ module Audited
               a=self.audits.build(add_additional_columns(attrs))
               a.save(validate: false)
               combine_audits_if_needed if attrs[:action] != 'create'
-              audit
+              a
             }
           else
             run_callbacks(:audit) {
@@ -436,6 +480,20 @@ module Audited
         yield
       ensure
         enable_auditing if auditing_was_enabled
+      end
+
+      # Executes the block with auditing enabled.
+      #
+      #   Foo.with_auditing do
+      #     @foo.save
+      #   end
+      #
+      def with_auditing
+        auditing_was_enabled = auditing_enabled
+        enable_auditing
+        yield
+      ensure
+        disable_auditing unless auditing_was_enabled
       end
 
       def disable_auditing
